@@ -28,42 +28,43 @@ DATA_DIR.mkdir(exist_ok=True)
 BUILDER_KEY = os.getenv("BUILDER_KEY", "change-me")
 RUNWAYML_API_SECRET = os.getenv("RUNWAYML_API_SECRET", "")
 
-# For this first REAL ART test, use standard Gen-4 Image.
-# After the visual quality is approved we can optimize cost/model.
-RUNWAY_IMAGE_MODEL = os.getenv("RUNWAY_IMAGE_MODEL", "gen4_image")
+RUNWAY_IMAGE_MODEL = os.getenv(
+    "RUNWAY_IMAGE_MODEL",
+    "gen4_image"
+)
 
-# Portrait output for coloring-book artwork.
-RUNWAY_IMAGE_RATIO = os.getenv("RUNWAY_IMAGE_RATIO", "720:1280")
+RUNWAY_IMAGE_RATIO = os.getenv(
+    "RUNWAY_IMAGE_RATIO",
+    "720:1280"
+)
 
 RUNWAY_API_BASE = "https://api.dev.runwayml.com/v1"
 RUNWAY_API_VERSION = "2024-11-06"
 
+MAX_RUNWAY_PROMPT_CHARS = 950
+
 app = FastAPI(
     title="KDP Coloring Book Builder",
-    version="2.0.0"
+    version="2.1.0"
 )
 
 jobs: Dict[str, Dict[str, Any]] = {}
 
 
 # ============================================================
-# INPUT MODEL
+# INPUT
 # ============================================================
 
 class JobPayload(BaseModel):
     mode: str = "TEST_PREVIEW"
     publish: bool = False
-
     kind: str = "kids"
 
     brand: str = "YOUR PUBLISHER BRAND"
     imprint: str = "Cosmo Crew Learning Adventures"
 
     series: str = "Space Adventure"
-    world: str = (
-        "futuristic space stations, friendly planets, rockets, "
-        "moons, stars, observatories"
-    )
+    world: str = "futuristic space adventure"
 
     topic: str = "Numbers 1-10"
     volume: int = 1
@@ -83,7 +84,6 @@ class JobPayload(BaseModel):
 
     next_book: dict = {}
     back_cover_affirmations: list = []
-
     quality_policy: dict = {}
     diversity_policy: dict = {}
     interactive_learning: dict = {}
@@ -112,12 +112,15 @@ def authorize(x_builder_key: str | None):
 
 
 # ============================================================
-# HELPERS
+# FILE HELPERS
 # ============================================================
 
 def get_job_dir(job_id: str) -> Path:
     folder = DATA_DIR / job_id
-    folder.mkdir(parents=True, exist_ok=True)
+    folder.mkdir(
+        parents=True,
+        exist_ok=True
+    )
     return folder
 
 
@@ -139,18 +142,26 @@ def http_json(
     body = None
 
     if payload is not None:
-        body = json.dumps(payload).encode("utf-8")
+        body = json.dumps(
+            payload
+        ).encode("utf-8")
 
-    req = urllib.request.Request(
+    request = urllib.request.Request(
         url=url,
         data=body,
         headers=headers or {},
-        method=method,
+        method=method
     )
 
     try:
-        with urllib.request.urlopen(req, timeout=timeout) as response:
-            raw = response.read().decode("utf-8")
+        with urllib.request.urlopen(
+            request,
+            timeout=timeout
+        ) as response:
+
+            raw = response.read().decode(
+                "utf-8"
+            )
 
             if not raw:
                 return {}
@@ -158,6 +169,7 @@ def http_json(
             return json.loads(raw)
 
     except urllib.error.HTTPError as e:
+
         error_body = e.read().decode(
             "utf-8",
             errors="replace"
@@ -168,37 +180,79 @@ def http_json(
         )
 
     except urllib.error.URLError as e:
+
         raise RuntimeError(
             f"Network error calling {url}: {e}"
         )
 
 
-def download_file(url: str, destination: Path):
-    req = urllib.request.Request(
+def download_file(
+    url: str,
+    destination: Path
+):
+    request = urllib.request.Request(
         url,
         headers={
             "User-Agent": "Mozilla/5.0"
         }
     )
 
-    with urllib.request.urlopen(req, timeout=180) as response:
-        destination.write_bytes(response.read())
+    with urllib.request.urlopen(
+        request,
+        timeout=180
+    ) as response:
+
+        destination.write_bytes(
+            response.read()
+        )
+
+
+# ============================================================
+# PROMPT SAFETY
+# ============================================================
+
+def clean_prompt(text: str) -> str:
+    """
+    Compress whitespace and guarantee Runway promptText
+    stays safely below its 1000-character limit.
+    """
+
+    cleaned = " ".join(
+        text.split()
+    ).strip()
+
+    if len(cleaned) <= MAX_RUNWAY_PROMPT_CHARS:
+        return cleaned
+
+    return cleaned[
+        :MAX_RUNWAY_PROMPT_CHARS
+    ].rsplit(
+        " ",
+        1
+    )[0]
 
 
 # ============================================================
 # RUNWAY
 # ============================================================
 
-def create_runway_image(prompt: str) -> str:
+def create_runway_image(
+    prompt: str
+) -> str:
+
     if not RUNWAYML_API_SECRET:
         raise RuntimeError(
-            "RUNWAYML_API_SECRET is missing from Railway Variables."
+            "RUNWAYML_API_SECRET is missing."
         )
+
+    safe_prompt = clean_prompt(
+        prompt
+    )
 
     payload = {
         "model": RUNWAY_IMAGE_MODEL,
         "ratio": RUNWAY_IMAGE_RATIO,
-        "promptText": prompt,
+        "promptText": safe_prompt,
     }
 
     response = http_json(
@@ -209,11 +263,13 @@ def create_runway_image(prompt: str) -> str:
         timeout=120,
     )
 
-    task_id = response.get("id")
+    task_id = response.get(
+        "id"
+    )
 
     if not task_id:
         raise RuntimeError(
-            f"Runway did not return a task id: {response}"
+            f"Runway returned no task id: {response}"
         )
 
     return task_id
@@ -224,9 +280,12 @@ def wait_for_runway_image(
     timeout_seconds: int = 420,
 ) -> str:
 
-    start = time.time()
+    started = time.time()
 
-    while time.time() - start < timeout_seconds:
+    while (
+        time.time() - started
+        < timeout_seconds
+    ):
 
         result = http_json(
             method="GET",
@@ -236,16 +295,21 @@ def wait_for_runway_image(
         )
 
         status = str(
-            result.get("status", "")
+            result.get(
+                "status",
+                ""
+            )
         ).upper()
 
         if status == "SUCCEEDED":
 
-            output = result.get("output") or []
+            output = result.get(
+                "output"
+            ) or []
 
             if not output:
                 raise RuntimeError(
-                    f"Runway task succeeded but returned no image: {result}"
+                    "Runway succeeded but returned no image."
                 )
 
             return output[0]
@@ -256,238 +320,77 @@ def wait_for_runway_image(
             "CANCELLED",
         }:
             raise RuntimeError(
-                f"Runway image task failed: {result}"
+                f"Runway task failed: {result}"
             )
 
         time.sleep(5)
 
     raise RuntimeError(
-        f"Runway image task timed out: {task_id}"
+        f"Runway task timed out: {task_id}"
     )
 
 
 def generate_image(
     prompt: str,
-    output_path: Path,
+    output_path: Path
 ) -> dict:
 
-    task_id = create_runway_image(prompt)
+    safe_prompt = clean_prompt(
+        prompt
+    )
 
-    image_url = wait_for_runway_image(task_id)
+    task_id = create_runway_image(
+        safe_prompt
+    )
+
+    image_url = wait_for_runway_image(
+        task_id
+    )
 
     download_file(
         image_url,
-        output_path,
+        output_path
     )
 
     return {
         "task_id": task_id,
+        "prompt_length": len(
+            safe_prompt
+        ),
         "image_url": image_url,
-        "local_file": str(output_path),
+        "local_file": str(
+            output_path
+        ),
     }
 
 
 # ============================================================
-# ART DIRECTION
-# ============================================================
-
-MASTER_ART_DIRECTION = """
-Create a premium professional children's coloring-book illustration.
-
-VISUAL QUALITY:
-The finished illustration must look like artwork from a high-quality
-commercial children's coloring book sold in bookstores and on Amazon.
-
-STYLE:
-Cute polished modern kawaii children's illustration.
-Warm, expressive, charming characters.
-Large friendly eyes.
-Natural joyful facial expressions.
-Smooth professional black outlines.
-Consistent line weight.
-Detailed enough to feel premium, but not overcrowded.
-Large open areas that children ages 3-5 can comfortably color.
-
-BLACK AND WHITE ONLY:
-Pure white background.
-Crisp black line art.
-NO color.
-NO gray.
-NO grayscale.
-NO shading.
-NO hatching.
-NO gradients.
-NO filled black backgrounds.
-
-IMPORTANT:
-Do NOT draw words.
-Do NOT draw letters.
-Do NOT draw numbers.
-Do NOT draw captions.
-Do NOT draw watermarks.
-Do NOT draw page borders.
-Typography will be added separately by the book-building system.
-
-CHARACTERS:
-The recurring Cosmo Crew are young child space explorers.
-
-NIA:
-Young Black girl.
-Dark skin.
-Two rounded natural puff ponytails.
-Bright expressive eyes.
-Friendly adventurous personality.
-Futuristic child astronaut suit.
-
-MATEO:
-Young Latino boy.
-Warm medium skin.
-Short dark hair.
-Bright expressive eyes.
-Confident friendly personality.
-Futuristic child astronaut suit.
-
-ANAYA:
-Young South Asian girl.
-Warm brown skin.
-Long dark hair styled neatly for an astronaut helmet.
-Bright expressive eyes.
-Curious joyful personality.
-Futuristic child astronaut suit.
-
-All children must look approximately the same age.
-They are friends and equals.
-Their astronaut suits should share one consistent futuristic design language.
-
-WORLD:
-Whimsical futuristic space adventure.
-Friendly planets.
-Stars.
-Moons.
-Rockets.
-Space stations.
-Observatories.
-Cute cosmic companions.
-Imaginative sci-fi environments designed specifically for children.
-
-The composition must fill most of the portrait page.
-Avoid huge empty areas.
-Every page should feel like a complete illustrated scene.
-"""
-
-
-# ============================================================
-# THREE TEST PAGE PROMPTS
+# ART PROMPTS
 # ============================================================
 
 def prompt_meet_the_crew() -> str:
-    return MASTER_ART_DIRECTION + """
 
-SCENE:
-A beautiful introductory group portrait of Nia, Mateo, and Anaya
-standing together as the Cosmo Crew.
-
-They are inside an incredible child-friendly futuristic space
-observatory.
-
-Behind them:
-a giant curved observation window,
-Saturn-like planets,
-stars,
-a friendly small rocket,
-futuristic control panels,
-and a magical distant space city.
-
-Nia stands proudly on the left.
-Mateo stands confidently in the center.
-Anaya stands cheerfully on the right.
-
-All three children are smiling and ready for adventure.
-
-Make this feel like the opening illustration of a premium children's
-coloring-book series.
-
-Portrait composition.
-Full-body characters.
-Rich environment.
-Large colorable areas.
-No words or numbers anywhere.
+    return """
+Premium black-and-white children's coloring-book illustration, polished kawaii style, smooth bold outlines, pure white background, no shading, no gray, no color, no text. Three recurring child astronauts stand together in a futuristic space observatory. Nia: young Black girl with two natural puff ponytails. Mateo: young Latino boy with short dark hair. Anaya: young South Asian girl with long dark hair. All are the same age, cheerful and expressive, wearing matching futuristic astronaut suits. Behind them: curved space window, planets, stars, friendly rocket, futuristic controls, distant magical space city. Full-body portrait composition, detailed but easy for ages 3-5 to color, large open coloring areas, professional commercial coloring-book quality.
 """
 
 
 def prompt_number_one() -> str:
-    return MASTER_ART_DIRECTION + """
 
-LEARNING SCENE — NUMBER ONE CONCEPT:
-
-Nia is exploring a magical moon garden.
-
-She is kneeling beside EXACTLY ONE large friendly star-shaped cosmic
-flower.
-
-The single star flower is the obvious central counting object.
-
-Around her:
-a small moon landscape,
-a distant rocket,
-planet rings in the sky,
-tiny decorative sparkles,
-space rocks,
-and a cute little alien companion.
-
-IMPORTANT COUNTING REQUIREMENT:
-There must be EXACTLY ONE large star-shaped flower.
-Do not add any other star-shaped objects that could confuse the count.
-
-The illustration should naturally teach the concept of ONE while still
-looking like an exciting full-page coloring scene.
-
-Do not write the numeral 1.
-Do not write any text.
-
-Portrait full-page composition.
-Premium detailed coloring-book art.
+    return """
+Premium black-and-white children's coloring-book illustration, polished kawaii style, smooth bold outlines, pure white background, no shading, no gray, no color, no text or numbers. Nia, a cheerful young Black girl astronaut with two natural puff ponytails, explores a magical moon garden. She kneels beside EXACTLY ONE large star-shaped cosmic flower, clearly the main counting object. Include a moon landscape, distant rocket, ringed planet in the sky, space rocks and one cute alien companion. Do not include any other star-shaped objects. Full portrait scene, expressive character, rich environment, large open coloring areas, professional children's coloring-book quality for ages 3-5.
 """
 
 
 def prompt_number_two() -> str:
-    return MASTER_ART_DIRECTION + """
 
-LEARNING SCENE — NUMBER TWO CONCEPT:
-
-Mateo is flying happily through a whimsical space scene using a small
-child astronaut jetpack.
-
-Beside him are EXACTLY TWO large friendly planets.
-
-One planet has rings.
-One planet has craters.
-
-The TWO planets are the obvious counting objects.
-
-Include:
-a beautiful rocket in the distance,
-a crescent moon,
-small decorative cosmic sparkles,
-and a futuristic space station far below.
-
-IMPORTANT COUNTING REQUIREMENT:
-There must be EXACTLY TWO large planets.
-Do not add additional planet-like circular objects.
-
-The composition should feel adventurous, polished, exciting, and
-high-value.
-
-Do not write the numeral 2.
-Do not write any text.
-
-Portrait full-page composition.
-Premium detailed children's coloring-book art.
+    return """
+Premium black-and-white children's coloring-book illustration, polished kawaii style, smooth bold outlines, pure white background, no shading, no gray, no color, no text or numbers. Mateo, a cheerful young Latino boy astronaut with short dark hair, flies through space with a child-friendly jetpack beside EXACTLY TWO large planets. One planet has rings and one has craters. These are the only large planets. Include a distant rocket, crescent moon, small cosmic sparkles and futuristic space station below. Adventurous portrait composition, expressive character, detailed but easy for ages 3-5 to color, large open coloring areas, professional commercial coloring-book quality.
 """
 
 
 # ============================================================
-# PDF LAYOUT
+# PDF HELPERS
 # ============================================================
 
 def draw_title_area(
@@ -495,28 +398,29 @@ def draw_title_area(
     width,
     height,
     title,
-    instruction,
+    instruction
 ):
+
     c.setFont(
         "Helvetica-Bold",
-        19,
+        19
     )
 
     c.drawCentredString(
         width / 2,
-        height - 0.55 * inch,
-        title,
+        height - 0.50 * inch,
+        title
     )
 
     c.setFont(
         "Helvetica",
-        11,
+        11
     )
 
     c.drawCentredString(
         width / 2,
-        height - 0.83 * inch,
-        instruction,
+        height - 0.78 * inch,
+        instruction
     )
 
 
@@ -524,30 +428,47 @@ def place_image_on_page(
     c,
     image_path: Path,
     width,
-    height,
+    height
 ):
+
     image = ImageReader(
-        str(image_path)
+        str(
+            image_path
+        )
     )
 
-    source_width, source_height = image.getSize()
+    source_width, source_height = (
+        image.getSize()
+    )
 
-    available_width = width - 0.7 * inch
-    available_height = height - 1.45 * inch
+    available_width = (
+        width - 0.55 * inch
+    )
+
+    available_height = (
+        height - 1.25 * inch
+    )
 
     scale = min(
-        available_width / source_width,
-        available_height / source_height,
+        available_width
+        / source_width,
+        available_height
+        / source_height
     )
 
-    draw_width = source_width * scale
-    draw_height = source_height * scale
+    draw_width = (
+        source_width * scale
+    )
+
+    draw_height = (
+        source_height * scale
+    )
 
     x = (
         width - draw_width
     ) / 2
 
-    y = 0.42 * inch
+    y = 0.30 * inch
 
     c.drawImage(
         image,
@@ -556,87 +477,93 @@ def place_image_on_page(
         width=draw_width,
         height=draw_height,
         preserveAspectRatio=True,
-        mask="auto",
+        mask="auto"
     )
 
 
 def create_three_page_preview(
     path: Path,
     payload: dict,
-    image_paths: list[Path],
+    image_paths: list[Path]
 ):
+
     width = float(
         payload.get(
             "trim_width",
-            8.5,
+            8.5
         )
     ) * inch
 
     height = float(
         payload.get(
             "trim_height",
-            11,
+            11
         )
     ) * inch
 
     c = canvas.Canvas(
-        str(path),
+        str(
+            path
+        ),
         pagesize=(
             width,
-            height,
-        ),
+            height
+        )
     )
 
     # PAGE 1
+
     draw_title_area(
         c,
         width,
         height,
         "MEET THE COSMO CREW",
-        "Three friends. One universe of learning adventures.",
+        "Three friends. One universe of learning adventures."
     )
 
     place_image_on_page(
         c,
         image_paths[0],
         width,
-        height,
+        height
     )
 
     c.showPage()
 
     # PAGE 2
+
     draw_title_area(
         c,
         width,
         height,
         "COLOR + COUNT: NUMBER 1",
-        "Find and color the ONE special cosmic flower.",
+        "Find and color the ONE special cosmic flower."
     )
 
     place_image_on_page(
         c,
         image_paths[1],
         width,
-        height,
+        height
     )
 
     c.showPage()
 
     # PAGE 3
+
     draw_title_area(
         c,
         width,
         height,
         "COLOR + COUNT: NUMBER 2",
-        "Find and color the TWO big planets.",
+        "Find and color the TWO big planets."
     )
 
     place_image_on_page(
         c,
         image_paths[2],
         width,
-        height,
+        height
     )
 
     c.showPage()
@@ -652,8 +579,9 @@ def create_metadata(
     path: Path,
     payload: dict,
     job_id: str,
-    runway_results: list,
+    runway_results: list
 ):
+
     metadata = {
         "job_id": job_id,
 
@@ -663,24 +591,24 @@ def create_metadata(
 
         "series": payload.get(
             "series",
-            "Space Adventure",
+            "Space Adventure"
         ),
 
         "topic": payload.get(
             "topic",
-            "Numbers 1-10",
+            "Numbers 1-10"
         ),
 
         "age_band": payload.get(
             "age_band",
-            "3-5",
+            "3-5"
         ),
 
         "preview_pages_generated": 3,
 
         "target_final_page_count": payload.get(
             "page_count_target",
-            28,
+            28
         ),
 
         "runway_model": RUNWAY_IMAGE_MODEL,
@@ -692,45 +620,73 @@ def create_metadata(
         "notes": [
             "REAL ART TEST ONLY.",
             "Nothing is uploaded to Amazon KDP.",
-            "Three pages are generated to approve visual quality before generating the full book.",
-            "Typography is added separately from the AI artwork.",
-            "No holiday or seasonal content is used.",
-        ],
+            "Three pages only for visual approval.",
+            "AI image artwork contains no typography.",
+            "All text is added separately in the PDF builder.",
+            "No holiday or seasonal content."
+        ]
     }
 
     path.write_text(
         json.dumps(
             metadata,
-            indent=2,
+            indent=2
         ),
-        encoding="utf-8",
+        encoding="utf-8"
     )
 
 
 # ============================================================
-# JOB PROCESSOR
+# JOB
 # ============================================================
 
 def build_job(
     job_id: str,
     payload: dict,
-    base_url: str,
+    base_url: str
 ):
+
     try:
 
-        jobs[job_id]["status"] = "RUNNING"
+        jobs[job_id][
+            "status"
+        ] = "RUNNING"
 
         folder = get_job_dir(
             job_id
         )
 
-        page1 = folder / "page_01_meet_cosmo_crew.png"
-        page2 = folder / "page_02_number_one.png"
-        page3 = folder / "page_03_number_two.png"
+        page1 = (
+            folder
+            / "page_01_meet_cosmo_crew.png"
+        )
 
-        preview_pdf = folder / "real_art_preview.pdf"
-        metadata_file = folder / "metadata.json"
-        package_file = folder / "real_art_preview_package.zip"
+        page2 = (
+            folder
+            / "page_02_number_one.png"
+        )
+
+        page3 = (
+            folder
+            / "page_03_number_two.png"
+        )
+
+        preview_pdf = (
+            folder
+            / "real_art_preview.pdf"
+        )
+
+        metadata_file = (
+            folder
+            / "metadata.json"
+        )
+
+        package_file = (
+            folder
+            / "real_art_preview_package.zip"
+        )
+
+        # PAGE 1
 
         jobs[job_id][
             "progress"
@@ -738,8 +694,10 @@ def build_job(
 
         result1 = generate_image(
             prompt_meet_the_crew(),
-            page1,
+            page1
         )
+
+        # PAGE 2
 
         jobs[job_id][
             "progress"
@@ -747,8 +705,10 @@ def build_job(
 
         result2 = generate_image(
             prompt_number_one(),
-            page2,
+            page2
         )
+
+        # PAGE 3
 
         jobs[job_id][
             "progress"
@@ -756,18 +716,18 @@ def build_job(
 
         result3 = generate_image(
             prompt_number_two(),
-            page3,
+            page3
         )
 
         runway_results = [
             result1,
             result2,
-            result3,
+            result3
         ]
 
         jobs[job_id][
             "progress"
-        ] = "Building preview PDF"
+        ] = "Building real-art preview PDF"
 
         create_three_page_preview(
             preview_pdf,
@@ -775,46 +735,46 @@ def build_job(
             [
                 page1,
                 page2,
-                page3,
-            ],
+                page3
+            ]
         )
 
         create_metadata(
             metadata_file,
             payload,
             job_id,
-            runway_results,
+            runway_results
         )
 
         with zipfile.ZipFile(
             package_file,
             "w",
-            zipfile.ZIP_DEFLATED,
+            zipfile.ZIP_DEFLATED
         ) as archive:
 
             archive.write(
                 page1,
-                page1.name,
+                page1.name
             )
 
             archive.write(
                 page2,
-                page2.name,
+                page2.name
             )
 
             archive.write(
                 page3,
-                page3.name,
+                page3.name
             )
 
             archive.write(
                 preview_pdf,
-                preview_pdf.name,
+                preview_pdf.name
             )
 
             archive.write(
                 metadata_file,
-                metadata_file.name,
+                metadata_file.name
             )
 
         jobs[job_id].update(
@@ -827,10 +787,11 @@ def build_job(
 
                 "preview_pages_generated": 3,
 
-                "target_final_page_count": payload.get(
-                    "page_count_target",
-                    28,
-                ),
+                "target_final_page_count":
+                    payload.get(
+                        "page_count_target",
+                        28
+                    ),
 
                 "interior_pdf_url":
                     f"{base_url}/files/{job_id}/{preview_pdf.name}",
@@ -848,7 +809,7 @@ def build_job(
                     f"{base_url}/files/{job_id}/{metadata_file.name}",
 
                 "package_url":
-                    f"{base_url}/files/{job_id}/{package_file.name}",
+                    f"{base_url}/files/{job_id}/{package_file.name}"
             }
         )
 
@@ -857,8 +818,12 @@ def build_job(
         jobs[job_id].update(
             {
                 "status": "FAILED",
-                "progress": "Generation failed",
-                "error": repr(e),
+
+                "progress":
+                    "Generation failed",
+
+                "error":
+                    repr(e)
             }
         )
 
@@ -869,30 +834,56 @@ def build_job(
 
 @app.get("/")
 def root():
+
     return {
-        "service": "KDP Coloring Book Builder",
-        "version": "2.0.0",
-        "status": "ready",
-        "runway_enabled": bool(
-            RUNWAYML_API_SECRET
-        ),
-        "model": RUNWAY_IMAGE_MODEL,
-        "ratio": RUNWAY_IMAGE_RATIO,
-        "test_only": True,
+        "service":
+            "KDP Coloring Book Builder",
+
+        "version":
+            "2.1.0",
+
+        "status":
+            "ready",
+
+        "runway_enabled":
+            bool(
+                RUNWAYML_API_SECRET
+            ),
+
+        "model":
+            RUNWAY_IMAGE_MODEL,
+
+        "ratio":
+            RUNWAY_IMAGE_RATIO,
+
+        "test_only":
+            True
     }
 
 
 @app.get("/health")
 def health():
+
     return {
-        "ok": True,
-        "service": "kdp-book-builder",
-        "version": "2.0.0",
-        "runway_enabled": bool(
-            RUNWAYML_API_SECRET
-        ),
-        "model": RUNWAY_IMAGE_MODEL,
-        "ratio": RUNWAY_IMAGE_RATIO,
+        "ok":
+            True,
+
+        "service":
+            "kdp-book-builder",
+
+        "version":
+            "2.1.0",
+
+        "runway_enabled":
+            bool(
+                RUNWAYML_API_SECRET
+            ),
+
+        "model":
+            RUNWAY_IMAGE_MODEL,
+
+        "ratio":
+            RUNWAY_IMAGE_RATIO
     }
 
 
@@ -902,40 +893,50 @@ def create_job(
     request: Request,
     x_builder_key: str | None = Header(
         default=None
-    ),
+    )
 ):
+
     authorize(
         x_builder_key
     )
 
     if payload.publish:
+
         raise HTTPException(
             status_code=400,
             detail=(
                 "Publishing is disabled "
                 "in TEST mode."
-            ),
+            )
         )
 
-    job_id = uuid.uuid4().hex[:12]
+    job_id = (
+        uuid.uuid4()
+        .hex[:12]
+    )
 
     base_url = str(
         request.base_url
     ).rstrip("/")
 
     jobs[job_id] = {
-        "job_id": job_id,
+        "job_id":
+            job_id,
 
-        "status": "QUEUED",
+        "status":
+            "QUEUED",
 
-        "progress": "Waiting to start",
+        "progress":
+            "Waiting to start",
 
-        "created_at": time.time(),
+        "created_at":
+            time.time(),
 
         "status_url":
             f"{base_url}/status/{job_id}",
 
-        "publish_enabled": False,
+        "publish_enabled":
+            False
     }
 
     thread = threading.Thread(
@@ -943,9 +944,9 @@ def create_job(
         args=(
             job_id,
             payload.model_dump(),
-            base_url,
+            base_url
         ),
-        daemon=True,
+        daemon=True
     )
 
     thread.start()
@@ -958,16 +959,18 @@ def get_status(
     job_id: str,
     x_builder_key: str | None = Header(
         default=None
-    ),
+    )
 ):
+
     authorize(
         x_builder_key
     )
 
     if job_id not in jobs:
+
         raise HTTPException(
             status_code=404,
-            detail="Job not found",
+            detail="Job not found"
         )
 
     return jobs[job_id]
@@ -976,7 +979,7 @@ def get_status(
 @app.get("/files/{job_id}/{filename}")
 def get_file(
     job_id: str,
-    filename: str,
+    filename: str
 ):
 
     file_path = (
@@ -992,18 +995,22 @@ def get_file(
             DATA_DIR.resolve()
         )
     ):
+
         raise HTTPException(
             status_code=403,
-            detail="Invalid path",
+            detail="Invalid path"
         )
 
     if not file_path.exists():
+
         raise HTTPException(
             status_code=404,
-            detail="File not found",
+            detail="File not found"
         )
 
     return FileResponse(
-        str(file_path),
-        filename=filename,
+        str(
+            file_path
+        ),
+        filename=filename
     )

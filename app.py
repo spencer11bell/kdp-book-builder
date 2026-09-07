@@ -45,7 +45,7 @@ MAX_RUNWAY_PROMPT_CHARS = 950
 
 app = FastAPI(
     title="KDP Coloring Book Builder",
-    version="2.1.0"
+    version="2.2.0"
 )
 
 jobs: Dict[str, Dict[str, Any]] = {}
@@ -112,7 +112,7 @@ def authorize(x_builder_key: str | None):
 
 
 # ============================================================
-# FILE HELPERS
+# HELPERS
 # ============================================================
 
 def get_job_dir(job_id: str) -> Path:
@@ -142,9 +142,7 @@ def http_json(
     body = None
 
     if payload is not None:
-        body = json.dumps(
-            payload
-        ).encode("utf-8")
+        body = json.dumps(payload).encode("utf-8")
 
     request = urllib.request.Request(
         url=url,
@@ -159,9 +157,7 @@ def http_json(
             timeout=timeout
         ) as response:
 
-            raw = response.read().decode(
-                "utf-8"
-            )
+            raw = response.read().decode("utf-8")
 
             if not raw:
                 return {}
@@ -186,10 +182,7 @@ def http_json(
         )
 
 
-def download_file(
-    url: str,
-    destination: Path
-):
+def download_file(url: str, destination: Path):
     request = urllib.request.Request(
         url,
         headers={
@@ -212,10 +205,6 @@ def download_file(
 # ============================================================
 
 def clean_prompt(text: str) -> str:
-    """
-    Compress whitespace and guarantee Runway promptText
-    stays safely below its 1000-character limit.
-    """
 
     cleaned = " ".join(
         text.split()
@@ -233,21 +222,112 @@ def clean_prompt(text: str) -> str:
 
 
 # ============================================================
+# AGE ADAPTIVE ART SYSTEM
+# ============================================================
+
+def normalize_age_band(age_band: str) -> str:
+
+    value = str(age_band).strip().lower()
+
+    if value in {
+        "3-5",
+        "3–5",
+        "ages 3-5",
+        "ages 3–5"
+    }:
+        return "3-5"
+
+    if value in {
+        "5-7",
+        "5–7",
+        "ages 5-7",
+        "ages 5–7"
+    }:
+        return "5-7"
+
+    if value in {
+        "7-9",
+        "7–9",
+        "ages 7-9",
+        "ages 7–9"
+    }:
+        return "7-9"
+
+    return "3-5"
+
+
+def get_age_art_profile(age_band: str) -> dict:
+
+    age = normalize_age_band(age_band)
+
+    profiles = {
+
+        "3-5": {
+            "label": "BEGINNER",
+            "complexity": (
+                "Very simple preschool coloring page. "
+                "One large main character. "
+                "Only 3 to 6 major objects total. "
+                "Very thick smooth outlines. "
+                "Huge open coloring spaces. "
+                "Minimal background detail. "
+                "No tiny decorative objects. "
+                "No crowded scenery."
+            ),
+            "activity": (
+                "One extremely obvious learning task. "
+                "Counting objects must be large and clearly separated."
+            )
+        },
+
+        "5-7": {
+            "label": "INTERMEDIATE",
+            "complexity": (
+                "Moderately detailed children's coloring page. "
+                "One or two main characters. "
+                "About 6 to 10 major visual elements. "
+                "Bold clean outlines. "
+                "Good open coloring areas with some environment detail. "
+                "Interesting but not crowded."
+            ),
+            "activity": (
+                "Learning task can include counting, matching, tracing, "
+                "finding, comparing or simple problem solving."
+            )
+        },
+
+        "7-9": {
+            "label": "ADVANCED KIDS",
+            "complexity": (
+                "Detailed premium children's coloring page. "
+                "Richer environment and visual storytelling. "
+                "About 10 to 16 meaningful visual elements. "
+                "Clean medium-weight outlines. "
+                "Smaller coloring areas are acceptable. "
+                "More background detail while remaining readable."
+            ),
+            "activity": (
+                "Learning task may involve multi-step counting, patterns, "
+                "spelling, math, science clues or visual problem solving."
+            )
+        }
+    }
+
+    return profiles[age]
+
+
+# ============================================================
 # RUNWAY
 # ============================================================
 
-def create_runway_image(
-    prompt: str
-) -> str:
+def create_runway_image(prompt: str) -> str:
 
     if not RUNWAYML_API_SECRET:
         raise RuntimeError(
             "RUNWAYML_API_SECRET is missing."
         )
 
-    safe_prompt = clean_prompt(
-        prompt
-    )
+    safe_prompt = clean_prompt(prompt)
 
     payload = {
         "model": RUNWAY_IMAGE_MODEL,
@@ -263,9 +343,7 @@ def create_runway_image(
         timeout=120,
     )
 
-    task_id = response.get(
-        "id"
-    )
+    task_id = response.get("id")
 
     if not task_id:
         raise RuntimeError(
@@ -282,10 +360,7 @@ def wait_for_runway_image(
 
     started = time.time()
 
-    while (
-        time.time() - started
-        < timeout_seconds
-    ):
+    while time.time() - started < timeout_seconds:
 
         result = http_json(
             method="GET",
@@ -295,17 +370,12 @@ def wait_for_runway_image(
         )
 
         status = str(
-            result.get(
-                "status",
-                ""
-            )
+            result.get("status", "")
         ).upper()
 
         if status == "SUCCEEDED":
 
-            output = result.get(
-                "output"
-            ) or []
+            output = result.get("output") or []
 
             if not output:
                 raise RuntimeError(
@@ -317,7 +387,7 @@ def wait_for_runway_image(
         if status in {
             "FAILED",
             "CANCELED",
-            "CANCELLED",
+            "CANCELLED"
         }:
             raise RuntimeError(
                 f"Runway task failed: {result}"
@@ -335,9 +405,7 @@ def generate_image(
     output_path: Path
 ) -> dict:
 
-    safe_prompt = clean_prompt(
-        prompt
-    )
+    safe_prompt = clean_prompt(prompt)
 
     task_id = create_runway_image(
         safe_prompt
@@ -354,43 +422,124 @@ def generate_image(
 
     return {
         "task_id": task_id,
-        "prompt_length": len(
-            safe_prompt
-        ),
+        "prompt_length": len(safe_prompt),
         "image_url": image_url,
-        "local_file": str(
-            output_path
-        ),
+        "local_file": str(output_path),
     }
 
 
 # ============================================================
-# ART PROMPTS
+# CORE STYLE
 # ============================================================
 
-def prompt_meet_the_crew() -> str:
+def base_style(age_band: str) -> str:
 
-    return """
-Premium black-and-white children's coloring-book illustration, polished kawaii style, smooth bold outlines, pure white background, no shading, no gray, no color, no text. Three recurring child astronauts stand together in a futuristic space observatory. Nia: young Black girl with two natural puff ponytails. Mateo: young Latino boy with short dark hair. Anaya: young South Asian girl with long dark hair. All are the same age, cheerful and expressive, wearing matching futuristic astronaut suits. Behind them: curved space window, planets, stars, friendly rocket, futuristic controls, distant magical space city. Full-body portrait composition, detailed but easy for ages 3-5 to color, large open coloring areas, professional commercial coloring-book quality.
-"""
+    profile = get_age_art_profile(
+        age_band
+    )
 
+    return f"""
+Premium black-and-white children's coloring-book illustration.
+Modern cute kawaii style, warm expressive faces, commercial-quality
+artwork. Pure white background, crisp black outlines, no color, no gray,
+no shading, no gradients, no watermarks, no text, no letters, no numbers.
 
-def prompt_number_one() -> str:
+AGE ART DIRECTION:
+{profile["complexity"]}
 
-    return """
-Premium black-and-white children's coloring-book illustration, polished kawaii style, smooth bold outlines, pure white background, no shading, no gray, no color, no text or numbers. Nia, a cheerful young Black girl astronaut with two natural puff ponytails, explores a magical moon garden. She kneels beside EXACTLY ONE large star-shaped cosmic flower, clearly the main counting object. Include a moon landscape, distant rocket, ringed planet in the sky, space rocks and one cute alien companion. Do not include any other star-shaped objects. Full portrait scene, expressive character, rich environment, large open coloring areas, professional children's coloring-book quality for ages 3-5.
-"""
+LEARNING DIRECTION:
+{profile["activity"]}
 
-
-def prompt_number_two() -> str:
-
-    return """
-Premium black-and-white children's coloring-book illustration, polished kawaii style, smooth bold outlines, pure white background, no shading, no gray, no color, no text or numbers. Mateo, a cheerful young Latino boy astronaut with short dark hair, flies through space with a child-friendly jetpack beside EXACTLY TWO large planets. One planet has rings and one has craters. These are the only large planets. Include a distant rocket, crescent moon, small cosmic sparkles and futuristic space station below. Adventurous portrait composition, expressive character, detailed but easy for ages 3-5 to color, large open coloring areas, professional commercial coloring-book quality.
+The picture must be enjoyable and easy to color for the stated age.
 """
 
 
 # ============================================================
-# PDF HELPERS
+# CHARACTERS
+# ============================================================
+
+def nia_description() -> str:
+
+    return (
+        "Nia is a young Black girl space explorer with dark skin, "
+        "two rounded natural puff ponytails, large friendly eyes "
+        "and a futuristic child astronaut suit."
+    )
+
+
+def mateo_description() -> str:
+
+    return (
+        "Mateo is a young Latino boy space explorer with warm medium "
+        "skin, short dark hair, large friendly eyes and a futuristic "
+        "child astronaut suit."
+    )
+
+
+def anaya_description() -> str:
+
+    return (
+        "Anaya is a young South Asian girl space explorer with warm "
+        "brown skin, long dark hair, large friendly eyes and a "
+        "futuristic child astronaut suit."
+    )
+
+
+# ============================================================
+# TEST PROMPTS
+# ============================================================
+
+def prompt_meet_the_crew(age_band: str) -> str:
+
+    return clean_prompt(
+        base_style(age_band)
+        + f"""
+{nia_description()}
+{mateo_description()}
+{anaya_description()}
+
+Scene: Nia, Mateo and Anaya stand together inside a friendly futuristic
+space observatory. They smile proudly as a team. Include one large curved
+space window, one ringed planet, one moon and one small rocket.
+Keep the characters large and central. Full-body portrait composition.
+"""
+    )
+
+
+def prompt_number_one(age_band: str) -> str:
+
+    return clean_prompt(
+        base_style(age_band)
+        + f"""
+{nia_description()}
+
+Learning scene: Nia kneels happily on the moon beside EXACTLY ONE large
+star-shaped cosmic flower. The flower must be the obvious counting object.
+Include only a simple moon ground, one small rocket in the distance and
+one friendly alien companion. Do not include any other stars or
+star-shaped objects. Make Nia and the flower large and easy to color.
+"""
+    )
+
+
+def prompt_number_two(age_band: str) -> str:
+
+    return clean_prompt(
+        base_style(age_band)
+        + f"""
+{mateo_description()}
+
+Learning scene: Mateo flies gently through space using a small jetpack.
+Beside him are EXACTLY TWO large planets. One planet has rings and the
+other has craters. These are the only planets. Include one small rocket
+far away and a simple crescent moon. Keep Mateo and the two planets large,
+clear and easy to color.
+"""
+    )
+
+
+# ============================================================
+# PDF
 # ============================================================
 
 def draw_title_area(
@@ -432,14 +581,10 @@ def place_image_on_page(
 ):
 
     image = ImageReader(
-        str(
-            image_path
-        )
+        str(image_path)
     )
 
-    source_width, source_height = (
-        image.getSize()
-    )
+    source_width, source_height = image.getSize()
 
     available_width = (
         width - 0.55 * inch
@@ -450,19 +595,12 @@ def place_image_on_page(
     )
 
     scale = min(
-        available_width
-        / source_width,
-        available_height
-        / source_height
+        available_width / source_width,
+        available_height / source_height
     )
 
-    draw_width = (
-        source_width * scale
-    )
-
-    draw_height = (
-        source_height * scale
-    )
+    draw_width = source_width * scale
+    draw_height = source_height * scale
 
     x = (
         width - draw_width
@@ -501,24 +639,27 @@ def create_three_page_preview(
         )
     ) * inch
 
+    age_band = normalize_age_band(
+        payload.get(
+            "age_band",
+            "3-5"
+        )
+    )
+
     c = canvas.Canvas(
-        str(
-            path
-        ),
+        str(path),
         pagesize=(
             width,
             height
         )
     )
 
-    # PAGE 1
-
     draw_title_area(
         c,
         width,
         height,
         "MEET THE COSMO CREW",
-        "Three friends. One universe of learning adventures."
+        f"Space Adventure • Ages {age_band}"
     )
 
     place_image_on_page(
@@ -529,8 +670,6 @@ def create_three_page_preview(
     )
 
     c.showPage()
-
-    # PAGE 2
 
     draw_title_area(
         c,
@@ -548,8 +687,6 @@ def create_three_page_preview(
     )
 
     c.showPage()
-
-    # PAGE 3
 
     draw_title_area(
         c,
@@ -582,7 +719,19 @@ def create_metadata(
     runway_results: list
 ):
 
+    age_band = normalize_age_band(
+        payload.get(
+            "age_band",
+            "3-5"
+        )
+    )
+
+    profile = get_age_art_profile(
+        age_band
+    )
+
     metadata = {
+
         "job_id": job_id,
 
         "test_only": True,
@@ -599,31 +748,35 @@ def create_metadata(
             "Numbers 1-10"
         ),
 
-        "age_band": payload.get(
-            "age_band",
-            "3-5"
-        ),
+        "age_band": age_band,
+
+        "art_difficulty":
+            profile["label"],
 
         "preview_pages_generated": 3,
 
-        "target_final_page_count": payload.get(
-            "page_count_target",
-            28
-        ),
+        "target_final_page_count":
+            payload.get(
+                "page_count_target",
+                28
+            ),
 
-        "runway_model": RUNWAY_IMAGE_MODEL,
+        "runway_model":
+            RUNWAY_IMAGE_MODEL,
 
-        "runway_ratio": RUNWAY_IMAGE_RATIO,
+        "runway_ratio":
+            RUNWAY_IMAGE_RATIO,
 
-        "runway_tasks": runway_results,
+        "runway_tasks":
+            runway_results,
 
         "notes": [
-            "REAL ART TEST ONLY.",
+            "Age-adaptive artwork system enabled.",
+            "Ages 3-5 use simplified coloring scenes.",
+            "Ages 5-7 use moderate detail.",
+            "Ages 7-9 use richer detail.",
             "Nothing is uploaded to Amazon KDP.",
-            "Three pages only for visual approval.",
-            "AI image artwork contains no typography.",
-            "All text is added separately in the PDF builder.",
-            "No holiday or seasonal content."
+            "No seasonal or holiday content."
         ]
     }
 
@@ -648,9 +801,16 @@ def build_job(
 
     try:
 
-        jobs[job_id][
-            "status"
-        ] = "RUNNING"
+        jobs[job_id]["status"] = "RUNNING"
+
+        age_band = normalize_age_band(
+            payload.get(
+                "age_band",
+                "3-5"
+            )
+        )
+
+        jobs[job_id]["age_band"] = age_band
 
         folder = get_job_dir(
             job_id
@@ -686,36 +846,36 @@ def build_job(
             / "real_art_preview_package.zip"
         )
 
-        # PAGE 1
-
         jobs[job_id][
             "progress"
-        ] = "Generating Meet the Cosmo Crew"
+        ] = "Generating age-adapted Cosmo Crew"
 
         result1 = generate_image(
-            prompt_meet_the_crew(),
+            prompt_meet_the_crew(
+                age_band
+            ),
             page1
         )
 
-        # PAGE 2
-
         jobs[job_id][
             "progress"
-        ] = "Generating Number 1 activity"
+        ] = "Generating age-adapted Number 1"
 
         result2 = generate_image(
-            prompt_number_one(),
+            prompt_number_one(
+                age_band
+            ),
             page2
         )
 
-        # PAGE 3
-
         jobs[job_id][
             "progress"
-        ] = "Generating Number 2 activity"
+        ] = "Generating age-adapted Number 2"
 
         result3 = generate_image(
-            prompt_number_two(),
+            prompt_number_two(
+                age_band
+            ),
             page3
         )
 
@@ -727,7 +887,7 @@ def build_job(
 
         jobs[job_id][
             "progress"
-        ] = "Building real-art preview PDF"
+        ] = "Building preview PDF"
 
         create_three_page_preview(
             preview_pdf,
@@ -785,6 +945,13 @@ def build_job(
 
                 "publish_enabled": False,
 
+                "age_band": age_band,
+
+                "art_difficulty":
+                    get_age_art_profile(
+                        age_band
+                    )["label"],
+
                 "preview_pages_generated": 3,
 
                 "target_final_page_count":
@@ -818,12 +985,8 @@ def build_job(
         jobs[job_id].update(
             {
                 "status": "FAILED",
-
-                "progress":
-                    "Generation failed",
-
-                "error":
-                    repr(e)
+                "progress": "Generation failed",
+                "error": repr(e)
             }
         )
 
@@ -840,7 +1003,7 @@ def root():
             "KDP Coloring Book Builder",
 
         "version":
-            "2.1.0",
+            "2.2.0",
 
         "status":
             "ready",
@@ -855,6 +1018,9 @@ def root():
 
         "ratio":
             RUNWAY_IMAGE_RATIO,
+
+        "age_adaptive":
+            True,
 
         "test_only":
             True
@@ -872,18 +1038,15 @@ def health():
             "kdp-book-builder",
 
         "version":
-            "2.1.0",
+            "2.2.0",
 
         "runway_enabled":
             bool(
                 RUNWAYML_API_SECRET
             ),
 
-        "model":
-            RUNWAY_IMAGE_MODEL,
-
-        "ratio":
-            RUNWAY_IMAGE_RATIO
+        "age_adaptive":
+            True
     }
 
 
@@ -904,10 +1067,7 @@ def create_job(
 
         raise HTTPException(
             status_code=400,
-            detail=(
-                "Publishing is disabled "
-                "in TEST mode."
-            )
+            detail="Publishing is disabled in TEST mode."
         )
 
     job_id = (
@@ -920,6 +1080,7 @@ def create_job(
     ).rstrip("/")
 
     jobs[job_id] = {
+
         "job_id":
             job_id,
 
@@ -928,6 +1089,11 @@ def create_job(
 
         "progress":
             "Waiting to start",
+
+        "age_band":
+            normalize_age_band(
+                payload.age_band
+            ),
 
         "created_at":
             time.time(),
@@ -1009,8 +1175,6 @@ def get_file(
         )
 
     return FileResponse(
-        str(
-            file_path
-        ),
+        str(file_path),
         filename=filename
     )

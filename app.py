@@ -43,7 +43,7 @@ DEFAULT_PAGE_COUNT = 3
 
 app = FastAPI(
     title="Cosmo Crew KDP Book Factory",
-    version="4.0.0"
+    version="4.1.0"
 )
 
 jobs: Dict[str, Dict[str, Any]] = {}
@@ -219,18 +219,28 @@ def wait_for_runway_image(task_id, timeout_seconds=420):
     raise RuntimeError(f"Runway timed out: {task_id}")
 
 
-def generate_image(prompt, output_path):
+def generate_image(prompt, output_path, max_attempts=3):
     safe_prompt = clean_prompt(prompt)
-    task_id = create_runway_image(safe_prompt)
-    image_url = wait_for_runway_image(task_id)
-    download_file(image_url, output_path)
-
-    return {
-        "task_id": task_id,
-        "prompt_length": len(safe_prompt),
-        "image_url": image_url,
-        "local_file": str(output_path)
-    }
+    last_error = None
+    for attempt in range(1, max_attempts + 1):
+        try:
+            task_id = create_runway_image(safe_prompt)
+            image_url = wait_for_runway_image(task_id)
+            download_file(image_url, output_path)
+            return {
+                "task_id": task_id,
+                "prompt_length": len(safe_prompt),
+                "image_url": image_url,
+                "local_file": str(output_path),
+                "attempt": attempt
+            }
+        except Exception as e:
+            last_error = e
+            if attempt < max_attempts:
+                time.sleep(8 * attempt)
+    raise RuntimeError(
+        f"Image generation failed after {max_attempts} attempts: {last_error}"
+    )
 
 
 # ============================================================
@@ -931,10 +941,12 @@ def build_job(job_id, payload, base_url):
         )
 
     except Exception as e:
+        current_progress = jobs.get(job_id, {}).get("progress", "Unknown stage")
         jobs[job_id].update(
             {
                 "status": "FAILED",
                 "progress": "Book generation failed",
+                "failed_stage": current_progress,
                 "error": repr(e)
             }
         )
@@ -948,7 +960,7 @@ def build_job(job_id, payload, base_url):
 def root():
     return {
         "service": "Cosmo Crew KDP Book Factory",
-        "version": "4.0.0",
+        "version": "4.1.0",
         "status": "ready",
         "runway_enabled": bool(RUNWAYML_API_SECRET),
         "runway_model": RUNWAY_IMAGE_MODEL,
@@ -963,7 +975,7 @@ def root():
 def health():
     return {
         "ok": True,
-        "version": "4.0.0",
+        "version": "4.1.0",
         "runway_enabled": bool(RUNWAYML_API_SECRET),
         "test_pages": DEFAULT_PAGE_COUNT,
         "covers_enabled": True,
